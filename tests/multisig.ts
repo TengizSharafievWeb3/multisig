@@ -23,6 +23,17 @@ describe('multisig', () => {
   const ownerD = anchor.web3.Keypair.generate();
   const owners = [ownerA.publicKey, ownerB.publicKey, ownerC.publicKey];
 
+  let multisigSigner;
+
+  before(async() => {
+    const [signer, nonce] =
+      await anchor.web3.PublicKey.findProgramAddress(
+        [multisig.publicKey.toBuffer()],
+        program.programId
+      );
+    multisigSigner = signer;
+  });
+
   it('Should create multisig 2 out of 3', async () => {
     await program.methods
       .createMultisig(owners, new anchor.BN(2))
@@ -103,4 +114,42 @@ describe('multisig', () => {
       .to.be.rejectedWith(/Threshold must be less than or equal to the number of owners/);
 
   });
+
+  it('Should create tx', async () => {
+    const pid = program.programId;
+    const accs = [
+      {
+        pubkey: multisig.publicKey,
+        isWritable: true,
+        isSigner: false,
+      },
+      {
+        pubkey: multisigSigner,
+        isWritable: false,
+        isSigner: true,
+      },
+    ];
+    const newOwners = [ownerA.publicKey, ownerB.publicKey, ownerD.publicKey];
+    const data = program.coder.instruction.encode("set_owners", { owners: newOwners, });
+    const transaction = anchor.web3.Keypair.generate();
+
+    await program.methods
+      .createTransaction(pid, accs, data)
+      .accounts({
+        multisig: multisig.publicKey,
+        transaction: transaction.publicKey,
+        proposer: ownerA.publicKey,
+        payer: provider.wallet.publicKey,
+      })
+      .signers([transaction, ownerA])
+      .rpc();
+
+    const transactionAcccount = await program.account.transaction.fetch(transaction.publicKey);
+    expect(transactionAcccount.programId).to.be.deep.equal(program.programId);
+    expect(transactionAcccount.accounts).to.be.deep.equal(accs);
+    expect(transactionAcccount.data).to.be.deep.equal(data);
+    expect(transactionAcccount.multisig).to.be.deep.equal(multisig.publicKey);
+  });
+
+
 });
