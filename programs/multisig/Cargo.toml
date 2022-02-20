@@ -1,0 +1,21 @@
+[package]
+name = "multisig"
+version = "0.1.0"
+author = ["Tengiz Sharafiev <btolfa@gmail.com>"]
+description = "Modernized fork of Serum-Multisig"
+edition = "2018"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "multisig"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+default = []
+
+[dependencies]
+anchor-lang = "0.21.0"
