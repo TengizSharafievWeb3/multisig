@@ -1,5 +1,10 @@
 use anchor_lang::prelude::*;
 
+use anchor_lang::solana_program;
+use anchor_lang::solana_program::instruction::Instruction;
+use std::convert::Into;
+use std::ops::Deref;
+
 declare_id!("Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS");
 
 #[program]
@@ -55,6 +60,21 @@ pub mod multisig {
         Ok(())
     }
 
+    // Approves a transaction on behalf of an owner of the multisig.
+    pub fn approve(ctx: Context<Approve>) -> ProgramResult {
+        let owner_index = ctx
+            .accounts
+            .multisig
+            .owners
+            .iter()
+            .position(|a| a == ctx.accounts.owner.key)
+            .ok_or(ErrorCode::InvalidOwner)?;
+
+        ctx.accounts.transaction.signers[owner_index] = true;
+
+        Ok(())
+    }
+
     // Sets the owners field on the multisig. The only way this can be invoked
     // is via a recursive call from execute_transaction -> set_owners.
     pub fn set_owners(ctx: Context<Auth>, owners: Vec<Pubkey>) -> Result<()> {
@@ -72,6 +92,62 @@ pub mod multisig {
 
         Ok(())
     }
+
+    // Changes the execution threshold of the multisig. The only way this can be
+    // invoked is via a recursive call from execute_transaction ->
+    // change_threshold.
+    pub fn change_threshold(ctx: Context<Auth>, threshold: u64) -> ProgramResult {
+        require!(threshold > 0, InvalidThreshold);
+        require!(threshold > ctx.accounts.multisig.owners.len() as u64, InvalidThreshold);
+
+        let multisig = &mut ctx.accounts.multisig;
+        multisig.threshold = threshold;
+        Ok(())
+    }
+
+    // Executes the given transaction if threshold owners have signed it.
+    pub fn execute_transaction(ctx: Context<ExecuteTransaction>) -> ProgramResult {
+        require!(!ctx.accounts.transaction.did_execute, AlreadyExecuted);
+
+        // Do we have enough signers.
+        let sig_count = ctx
+            .accounts
+            .transaction
+            .signers
+            .iter()
+            .filter(|&did_sign| *did_sign)
+            .count() as u64;
+
+        if sig_count < ctx.accounts.multisig.threshold {
+            return Err(ErrorCode::NotEnoughSigners.into());
+        }
+
+
+        // Execute the transaction signed by the multisig.
+        let mut ix: Instruction = ctx.accounts.transaction.deref().into();
+        ix.accounts = ix
+            .accounts
+            .iter()
+            .map(|acc| {
+                let mut acc = acc.clone();
+                if &acc.pubkey == ctx.accounts.multisig_signer.key {
+                    acc.is_signer = true;
+                }
+                acc
+            })
+            .collect();
+        let multisig_key = ctx.accounts.multisig.key();
+        let seeds = &[multisig_key.as_ref(), &[ctx.accounts.multisig.nonce]];
+        let signer = &[&seeds[..]];
+        let accounts = ctx.remaining_accounts;
+        solana_program::program::invoke_signed(&ix, accounts, signer)?;
+
+        // Burn the transaction to ensure one time use.
+        ctx.accounts.transaction.did_execute = true;
+
+        Ok(())
+    }
+
 }
 
 
@@ -100,11 +176,31 @@ pub struct CreateTransaction<'info> {
 }
 
 #[derive(Accounts)]
+pub struct Approve<'info> {
+    #[account(constraint = multisig.owner_set_seqno == transaction.owner_set_seqno)]
+    multisig: Account<'info, Multisig>,
+    #[account(mut, has_one = multisig)]
+    transaction: Account<'info, Transaction>,
+    // One of the multisig owners. Checked in the handler.
+    owner: Signer<'info>,
+}
+
+#[derive(Accounts)]
 pub struct Auth<'info> {
     #[account(mut)]
     multisig: Account<'info, Multisig>,
     #[account(seeds = [multisig.key().as_ref()], bump)]
     multisig_signer: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct ExecuteTransaction<'info> {
+    #[account(constraint = multisig.owner_set_seqno == transaction.owner_set_seqno)]
+    multisig: Account<'info, Multisig>,
+    #[account(seeds = [multisig.key().as_ref()], bump)]
+    multisig_signer: UncheckedAccount<'info>,
+    #[account(mut, has_one = multisig)]
+    transaction: Account<'info, Transaction>,
 }
 
 const OWNERS_MAX_SIZE : usize = 8;
@@ -138,6 +234,16 @@ pub struct Transaction {
     pub did_execute: bool,
     // Owner set sequence number.
     pub owner_set_seqno: u32,
+}
+
+impl From<&Transaction> for Instruction {
+    fn from(tx: &Transaction) -> Instruction {
+        Instruction {
+            program_id: tx.program_id,
+            accounts: tx.accounts.iter().map(Into::into).collect(),
+            data: tx.data.clone(),
+        }
+    }
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
